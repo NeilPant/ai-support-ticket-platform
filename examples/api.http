@@ -1,0 +1,24 @@
+### Health check
+GET http://127.0.0.1:8000/health
+
+### Create a ticket
+POST http://127.0.0.1:8000/tickets
+Content-Type: application/json
+
+{
+  "customer_email": "alex@example.com",
+  "subject": "Production API returns 500",
+  "description": "Our production API endpoint returns 500 errors and customers are blocked."
+}
+
+### Resolve a ticket
+POST http://127.0.0.1:8000/tickets/{{ticket_id}}/resolve
+
+### View workflow graph metadata
+GET http://127.0.0.1:8000/workflow/definition
+
+### Seed a demo dataset
+POST http://127.0.0.1:8000/demo/seed
+
+### View analytics
+GET http://127.0.0.1:8000/analytics/summary
