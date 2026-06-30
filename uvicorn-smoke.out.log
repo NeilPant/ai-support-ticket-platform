@@ -1,0 +1,8 @@
+INFO:     127.0.0.1:50120 - "GET /health HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50120 - "GET /readiness HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50120 - "POST /knowledge/reindex HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50120 - "POST /demo/seed HTTP/1.1" 201 Created
+INFO:     127.0.0.1:50120 - "GET /analytics/summary HTTP/1.1" 200 OK
+INFO:     127.0.0.1:50120 - "GET /workflow/definition HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56527 - "GET /workflow/definition HTTP/1.1" 200 OK
+INFO:     127.0.0.1:56525 - "GET /analytics/summary HTTP/1.1" 200 OK

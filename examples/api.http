@@ -1,7 +1,17 @@
-### Health check
+### Health
 GET http://127.0.0.1:8000/health
 
-### Create a ticket
+### Readiness
+GET http://127.0.0.1:8000/readiness
+
+### Reindex knowledge base
+POST http://127.0.0.1:8000/knowledge/reindex
+X-API-Key: dev-api-key
+
+### Search knowledge
+GET http://127.0.0.1:8000/knowledge/search?query=production%20api%20500
+
+### Create ticket
 POST http://127.0.0.1:8000/tickets
 Content-Type: application/json
 
@@ -11,14 +21,15 @@ Content-Type: application/json
   "description": "Our production API endpoint returns 500 errors and customers are blocked."
 }
 
-### Resolve a ticket
-POST http://127.0.0.1:8000/tickets/{{ticket_id}}/resolve
+### Run workflow
+POST http://127.0.0.1:8000/tickets/{{ticket_id}}/workflow-runs
 
-### View workflow graph metadata
-GET http://127.0.0.1:8000/workflow/definition
+### List workflow runs
+GET http://127.0.0.1:8000/tickets/{{ticket_id}}/workflow-runs
 
-### Seed a demo dataset
-POST http://127.0.0.1:8000/demo/seed
-
-### View analytics
+### Get analytics
 GET http://127.0.0.1:8000/analytics/summary
+
+### Seed demo tickets
+POST http://127.0.0.1:8000/demo/seed
+X-API-Key: dev-api-key

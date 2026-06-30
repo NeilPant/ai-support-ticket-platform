@@ -1,107 +1,284 @@
+from __future__ import annotations
+
 from typing import TypedDict
+from uuid import uuid4
 
 from langchain_core.prompts import ChatPromptTemplate
 from langgraph.graph import END, StateGraph
 
-from app.core.config import get_settings
-from app.models.ticket import Ticket, TicketCategory, TicketPriority, TicketStatus, WorkflowResult
-from app.workflows.knowledge_base import KNOWLEDGE_BASE
+from app.models.ticket import (
+    ClassificationResult,
+    EscalationDecision,
+    QualityReview,
+    ResolutionPlan,
+    RetrievedContext,
+    Ticket,
+    TicketCategory,
+    TicketPriority,
+    TicketStatus,
+    TokenUsage,
+    WorkflowResult,
+)
+from app.services.knowledge_service import KnowledgeService
+from app.services.llm_service import LLMService
 
 
 class SupportWorkflowState(TypedDict, total=False):
     ticket: Ticket
-    category: TicketCategory
-    priority: TicketPriority
-    knowledge_snippets: list[str]
+    trace_id: str
+    classification: ClassificationResult
+    retrieved_context: list[RetrievedContext]
+    resolution_plan: ResolutionPlan
     drafted_response: str
-    escalation_required: bool
-    escalation_reason: str | None
-    quality_score: float
-    risk_signals: list[str]
-    recommended_actions: list[str]
+    escalation_decision: EscalationDecision
+    quality_review: QualityReview
+    token_usage: TokenUsage
     workflow_steps: list[str]
 
 
 class SupportTicketWorkflow:
-    """LangGraph workflow that coordinates ticket resolution agents."""
-
-    def __init__(self) -> None:
+    def __init__(self, knowledge_service: KnowledgeService, llm_service: LLMService | None = None) -> None:
+        self.knowledge_service = knowledge_service
+        self.llm_service = llm_service or LLMService()
         self._graph = self._build_graph()
 
     def run(self, ticket: Ticket) -> WorkflowResult:
-        initial_state: SupportWorkflowState = {"ticket": ticket, "workflow_steps": []}
-        final_state = self._graph.invoke(initial_state)
-
+        self.knowledge_service.ensure_indexed()
+        initial_state: SupportWorkflowState = {
+            "ticket": ticket,
+            "trace_id": str(uuid4()),
+            "workflow_steps": [],
+            "token_usage": TokenUsage(),
+        }
+        state = self._graph.invoke(initial_state)
+        classification = state["classification"]
+        escalation = state["escalation_decision"]
+        quality = state["quality_review"]
+        status = TicketStatus.escalated if escalation.required else TicketStatus.resolved
         return WorkflowResult(
             ticket_id=ticket.id,
-            status=TicketStatus.escalated if final_state["escalation_required"] else TicketStatus.resolved,
-            category=final_state["category"],
-            priority=final_state["priority"],
-            knowledge_snippets=final_state["knowledge_snippets"],
-            drafted_response=final_state["drafted_response"],
-            escalation_required=final_state["escalation_required"],
-            escalation_reason=final_state["escalation_reason"],
-            quality_score=final_state["quality_score"],
-            risk_signals=final_state["risk_signals"],
-            recommended_actions=final_state["recommended_actions"],
-            workflow_steps=final_state["workflow_steps"],
+            trace_id=state["trace_id"],
+            status=status,
+            category=classification.category,
+            priority=classification.priority,
+            classification=classification,
+            retrieved_context=state["retrieved_context"],
+            knowledge_snippets=[item.content for item in state["retrieved_context"]],
+            resolution_plan=state["resolution_plan"],
+            drafted_response=state["drafted_response"],
+            escalation_decision=escalation,
+            escalation_required=escalation.required,
+            escalation_reason=escalation.reason,
+            quality_review=quality,
+            quality_score=quality.score,
+            risk_signals=classification.risk_signals,
+            recommended_actions=state["resolution_plan"].next_steps,
+            workflow_steps=state["workflow_steps"],
+            token_usage=state["token_usage"],
         )
 
     def analyze(self, ticket: Ticket) -> WorkflowResult:
-        state = self._classify({"ticket": ticket, "workflow_steps": []})
-        state = self._retrieve_knowledge(state)
-
+        self.knowledge_service.ensure_indexed()
+        state: SupportWorkflowState = {
+            "ticket": ticket,
+            "trace_id": str(uuid4()),
+            "workflow_steps": [],
+            "token_usage": TokenUsage(),
+        }
+        state = self._intake_validator(state)
+        state = self._classifier(state)
+        state = self._rag_retriever(state)
+        classification = state["classification"]
         return WorkflowResult(
             ticket_id=ticket.id,
+            trace_id=state["trace_id"],
             status=TicketStatus.analyzed,
-            category=state["category"],
-            priority=state["priority"],
-            knowledge_snippets=state["knowledge_snippets"],
-            risk_signals=self._detect_risk_signals(ticket),
-            recommended_actions=self._recommended_actions(state),
+            category=classification.category,
+            priority=classification.priority,
+            classification=classification,
+            retrieved_context=state["retrieved_context"],
+            knowledge_snippets=[item.content for item in state["retrieved_context"]],
+            risk_signals=classification.risk_signals,
             workflow_steps=state["workflow_steps"],
         )
 
     def describe(self) -> dict[str, object]:
+        nodes = [
+            "intake_validator",
+            "classifier",
+            "rag_retriever",
+            "resolution_planner",
+            "response_writer",
+            "escalation_decider",
+            "quality_guardrail",
+            "audit_logger",
+        ]
         return {
-            "name": "support_ticket_resolution_graph",
-            "nodes": [
-                "classifier",
-                "knowledge_retriever",
-                "resolution_writer",
-                "escalation_router",
-                "quality_checker",
-            ],
-            "edges": [
-                ("classifier", "knowledge_retriever"),
-                ("knowledge_retriever", "resolution_writer"),
-                ("resolution_writer", "escalation_router"),
-                ("escalation_router", "quality_checker"),
-            ],
+            "name": "ai_support_ticket_resolution_graph",
+            "nodes": nodes,
+            "edges": list(zip(nodes, nodes[1:], strict=False)),
         }
 
     def _build_graph(self):
         graph = StateGraph(SupportWorkflowState)
-        graph.add_node("classifier", self._classify)
-        graph.add_node("retriever", self._retrieve_knowledge)
-        graph.add_node("resolution_writer", self._draft_response)
-        graph.add_node("escalation_router", self._route_escalation)
-        graph.add_node("quality_checker", self._quality_check)
+        graph.add_node("intake_validator", self._intake_validator)
+        graph.add_node("classifier", self._classifier)
+        graph.add_node("rag_retriever", self._rag_retriever)
+        graph.add_node("resolution_planner", self._resolution_planner)
+        graph.add_node("response_writer", self._response_writer)
+        graph.add_node("escalation_decider", self._escalation_decider)
+        graph.add_node("quality_guardrail", self._quality_guardrail)
+        graph.add_node("audit_logger", self._audit_logger)
 
-        graph.set_entry_point("classifier")
-        graph.add_edge("classifier", "retriever")
-        graph.add_edge("retriever", "resolution_writer")
-        graph.add_edge("resolution_writer", "escalation_router")
-        graph.add_edge("escalation_router", "quality_checker")
-        graph.add_edge("quality_checker", END)
+        graph.set_entry_point("intake_validator")
+        graph.add_edge("intake_validator", "classifier")
+        graph.add_edge("classifier", "rag_retriever")
+        graph.add_edge("rag_retriever", "resolution_planner")
+        graph.add_edge("resolution_planner", "response_writer")
+        graph.add_edge("response_writer", "escalation_decider")
+        graph.add_edge("escalation_decider", "quality_guardrail")
+        graph.add_edge("quality_guardrail", "audit_logger")
+        graph.add_edge("audit_logger", END)
         return graph.compile()
 
-    def _classify(self, state: SupportWorkflowState) -> SupportWorkflowState:
+    def _intake_validator(self, state: SupportWorkflowState) -> SupportWorkflowState:
         ticket = state["ticket"]
-        text = f"{ticket.subject} {ticket.description}".lower()
+        if len(ticket.description.strip()) < 10:
+            raise ValueError("Ticket description is too short for workflow processing.")
+        return self._append_step(state, "intake_validator")
 
+    def _classifier(self, state: SupportWorkflowState) -> SupportWorkflowState:
+        ticket = state["ticket"]
+        fallback = self._fallback_classification(ticket)
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                (
+                    "system",
+                    "Classify customer support tickets. Return structured fields only.",
+                ),
+                (
+                    "human",
+                    "Subject: {subject}\nDescription: {description}",
+                ),
+            ]
+        )
+        classification, _usage = self.llm_service.structured(
+            prompt,
+            ClassificationResult,
+            {"subject": ticket.subject, "description": ticket.description},
+            fallback,
+        )
+        return self._append_step({**state, "classification": classification}, "classifier")
+
+    def _rag_retriever(self, state: SupportWorkflowState) -> SupportWorkflowState:
+        ticket = state["ticket"]
+        query = f"{ticket.subject} {ticket.description}"
+        retrieved = self.knowledge_service.search(query, limit=4).results
+        return self._append_step({**state, "retrieved_context": retrieved}, "rag_retriever")
+
+    def _resolution_planner(self, state: SupportWorkflowState) -> SupportWorkflowState:
+        classification = state["classification"]
+        context = state["retrieved_context"]
+        fallback = ResolutionPlan(
+            summary=f"Handle as a {classification.priority.value} {classification.category.value} support case.",
+            next_steps=[
+                "Acknowledge the customer and summarize the issue.",
+                "Use the retrieved support playbook guidance before proposing a fix.",
+                "Collect missing diagnostic details if the ticket lacks request IDs or payment references.",
+            ],
+            customer_questions=self._customer_questions(classification),
+            internal_notes=[f"Risk signals: {', '.join(classification.risk_signals) or 'none detected'}"],
+        )
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", "Create a concise support resolution plan from classification and retrieved context."),
+                (
+                    "human",
+                    "Classification: {classification}\nContext: {context}",
+                ),
+            ]
+        )
+        plan, _usage = self.llm_service.structured(
+            prompt,
+            ResolutionPlan,
+            {
+                "classification": classification.model_dump_json(),
+                "context": "\n\n".join(item.content for item in context),
+            },
+            fallback,
+        )
+        return self._append_step({**state, "resolution_plan": plan}, "resolution_planner")
+
+    def _response_writer(self, state: SupportWorkflowState) -> SupportWorkflowState:
+        ticket = state["ticket"]
+        plan = state["resolution_plan"]
+        context = state["retrieved_context"]
+        fallback = (
+            f"Thanks for contacting support. We reviewed your ticket, '{ticket.subject}', "
+            f"and identified this as a {state['classification'].priority.value} "
+            f"{state['classification'].category.value.replace('_', ' ')} issue. "
+            f"{plan.summary} {context[0].content if context else ''} "
+            "Please share any missing details requested above so we can continue quickly."
+        )
+        prompt = ChatPromptTemplate.from_messages(
+            [
+                ("system", "Draft a helpful, safe customer support response. Do not invent facts."),
+                (
+                    "human",
+                    "Ticket: {ticket}\nPlan: {plan}\nContext: {context}",
+                ),
+            ]
+        )
+        response, _usage = self.llm_service.text(
+            prompt,
+            {
+                "ticket": ticket.model_dump_json(),
+                "plan": plan.model_dump_json(),
+                "context": "\n\n".join(item.content for item in context),
+            },
+            fallback,
+        )
+        return self._append_step({**state, "drafted_response": response}, "response_writer")
+
+    def _escalation_decider(self, state: SupportWorkflowState) -> SupportWorkflowState:
+        classification = state["classification"]
+        signals = set(classification.risk_signals)
+        required = (
+            classification.priority == TicketPriority.urgent
+            or "production impact" in signals
+            or "payment sensitivity" in signals
+        )
+        target_team = None
+        if required and classification.category == TicketCategory.api_error:
+            target_team = "on-call engineering"
+        elif required and classification.category == TicketCategory.billing:
+            target_team = "billing operations"
+        reason = None
+        if required:
+            reason = "High-impact risk signals require human review before final closure."
+        decision = EscalationDecision(required=required, reason=reason, target_team=target_team)
+        return self._append_step({**state, "escalation_decision": decision}, "escalation_decider")
+
+    def _quality_guardrail(self, state: SupportWorkflowState) -> SupportWorkflowState:
+        response = state["drafted_response"].lower()
+        issues = []
+        if len(response.split()) < 35:
+            issues.append("Response is too short.")
+        if "thanks" not in response and "sorry" not in response:
+            issues.append("Response lacks acknowledgement.")
+        if "cvv" in response or "password" in response and "do not" not in response:
+            issues.append("Response may request sensitive credentials.")
+        score = round(max(0, 1 - (len(issues) * 0.25)), 2)
+        review = QualityReview(score=score, passed=score >= 0.75, issues=issues)
+        return self._append_step({**state, "quality_review": review}, "quality_guardrail")
+
+    def _audit_logger(self, state: SupportWorkflowState) -> SupportWorkflowState:
+        return self._append_step(state, "audit_logger")
+
+    def _fallback_classification(self, ticket: Ticket) -> ClassificationResult:
+        text = f"{ticket.subject} {ticket.description}".lower()
         category = TicketCategory.general
-        if any(term in text for term in ("payment", "invoice", "refund", "charged", "billing")):
+        if any(term in text for term in ("payment", "invoice", "refund", "charged", "billing", "debited")):
             category = TicketCategory.billing
         elif any(term in text for term in ("password", "login", "mfa", "reset", "account locked")):
             category = TicketCategory.authentication
@@ -113,92 +290,12 @@ class SupportTicketWorkflow:
         priority = TicketPriority.medium
         if any(term in text for term in ("production", "outage", "down", "urgent", "blocked")):
             priority = TicketPriority.urgent
-        elif any(term in text for term in ("failed", "cannot", "error", "locked")):
+        elif any(term in text for term in ("failed", "cannot", "error", "locked", "debited")):
             priority = TicketPriority.high
         elif any(term in text for term in ("question", "how do i", "feature request")):
             priority = TicketPriority.low
 
-        return {
-            **state,
-            "category": category,
-            "priority": priority,
-            "workflow_steps": [*state.get("workflow_steps", []), "classifier"],
-        }
-
-    def _retrieve_knowledge(self, state: SupportWorkflowState) -> SupportWorkflowState:
-        snippets = KNOWLEDGE_BASE[state["category"]]
-        return {
-            **state,
-            "knowledge_snippets": snippets,
-            "workflow_steps": [*state.get("workflow_steps", []), "knowledge_retriever"],
-        }
-
-    def _draft_response(self, state: SupportWorkflowState) -> SupportWorkflowState:
-        settings = get_settings()
-        if settings.use_llm and settings.openai_api_key:
-            response = self._draft_with_llm(state)
-        else:
-            response = self._draft_deterministic_response(state)
-
-        return {
-            **state,
-            "drafted_response": response,
-            "workflow_steps": [*state.get("workflow_steps", []), "resolution_writer"],
-        }
-
-    def _route_escalation(self, state: SupportWorkflowState) -> SupportWorkflowState:
-        category = state["category"]
-        priority = state["priority"]
-        text = f"{state['ticket'].subject} {state['ticket'].description}".lower()
-
-        escalation_required = priority == TicketPriority.urgent or (
-            category in {TicketCategory.billing, TicketCategory.api_error}
-            and any(term in text for term in ("debited", "production", "500", "outage"))
-        )
-
-        reason = None
-        if escalation_required:
-            reason = "The ticket involves a high-impact or sensitive issue that needs human review."
-
-        return {
-            **state,
-            "escalation_required": escalation_required,
-            "escalation_reason": reason,
-            "risk_signals": self._detect_risk_signals(state["ticket"]),
-            "recommended_actions": self._recommended_actions(state),
-            "workflow_steps": [*state.get("workflow_steps", []), "escalation_router"],
-        }
-
-    def _quality_check(self, state: SupportWorkflowState) -> SupportWorkflowState:
-        response = state["drafted_response"]
-        checks = [
-            "sorry" in response.lower() or "thanks" in response.lower(),
-            state["category"].value.replace("_", " ") in response.lower(),
-            len(response.split()) >= 35,
-        ]
-        quality_score = round(sum(checks) / len(checks), 2)
-
-        return {
-            **state,
-            "quality_score": quality_score,
-            "workflow_steps": [*state.get("workflow_steps", []), "quality_checker"],
-        }
-
-    def _draft_deterministic_response(self, state: SupportWorkflowState) -> str:
-        ticket = state["ticket"]
-        snippets = state["knowledge_snippets"]
-        category = state["category"].value.replace("_", " ")
-
-        return (
-            f"Thanks for contacting support about this {category} issue. "
-            f"We reviewed your ticket, '{ticket.subject}', and identified the next best steps. "
-            f"{snippets[0]} {snippets[1] if len(snippets) > 1 else ''} "
-            "Please share any missing details requested above so we can continue troubleshooting quickly."
-        )
-
-    def _detect_risk_signals(self, ticket: Ticket) -> list[str]:
-        text = f"{ticket.subject} {ticket.description}".lower()
-        signals: list[str] = []
+        signals = []
         signal_terms = {
             "production impact": ("production", "outage", "down", "blocked"),
             "payment sensitivity": ("debited", "charged", "refund", "invoice"),
@@ -208,53 +305,25 @@ class SupportTicketWorkflow:
         for label, terms in signal_terms.items():
             if any(term in text for term in terms):
                 signals.append(label)
-        return signals
+        urgency = {"low": 0.2, "medium": 0.45, "high": 0.7, "urgent": 0.95}[priority.value]
+        sentiment = "frustrated" if any(term in text for term in ("failed", "cannot", "blocked")) else "neutral"
+        return ClassificationResult(
+            category=category,
+            priority=priority,
+            sentiment=sentiment,
+            urgency_score=urgency,
+            confidence=0.78,
+            risk_signals=signals,
+        )
 
-    def _recommended_actions(self, state: SupportWorkflowState) -> list[str]:
-        category = state["category"]
-        priority = state["priority"]
-        actions = [
-            "Send the drafted response to acknowledge the issue.",
-            "Attach the retrieved knowledge-base guidance to the internal ticket.",
-        ]
-        if category == TicketCategory.api_error:
-            actions.append("Collect request ID, endpoint, timestamp, and response code.")
-        if category == TicketCategory.billing:
-            actions.append("Verify payment provider status before discussing refunds.")
-        if priority in {TicketPriority.high, TicketPriority.urgent}:
-            actions.append("Assign the ticket to the on-call support queue.")
-        return actions
+    def _customer_questions(self, classification: ClassificationResult) -> list[str]:
+        if classification.category == TicketCategory.api_error:
+            return ["Can you share the request ID, endpoint, timestamp, and response code?"]
+        if classification.category == TicketCategory.billing:
+            return ["Can you share the order ID and payment attempt timestamp?"]
+        if classification.category == TicketCategory.authentication:
+            return ["Have you requested a new reset link in the last 30 minutes?"]
+        return ["Can you share one example with timestamp and expected outcome?"]
 
-    def _draft_with_llm(self, state: SupportWorkflowState) -> str:
-        try:
-            from langchain_openai import ChatOpenAI
-        except ImportError:
-            return self._draft_deterministic_response(state)
-
-        try:
-            settings = get_settings()
-            prompt = ChatPromptTemplate.from_messages(
-                [
-                    (
-                        "system",
-                        "You are a concise support specialist. Draft a helpful response using the provided guidance.",
-                    ),
-                    (
-                        "human",
-                        "Subject: {subject}\nDescription: {description}\nCategory: {category}\nGuidance: {guidance}",
-                    ),
-                ]
-            )
-            model = ChatOpenAI(model=settings.llm_model, api_key=settings.openai_api_key)
-            chain = prompt | model
-            result = chain.invoke(
-                {
-                    "subject": state["ticket"].subject,
-                    "description": state["ticket"].description,
-                    "category": state["category"].value,
-                    "guidance": "\n".join(state["knowledge_snippets"]),
-                }
-            )
-            return str(result.content)
-        except Exception:
-            return self._draft_deterministic_response(state)
+    def _append_step(self, state: SupportWorkflowState, step: str) -> SupportWorkflowState:
+        return {**state, "workflow_steps": [*state.get("workflow_steps", []), step]}
