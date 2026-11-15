@@ -96,7 +96,7 @@ class TicketRepository:
         ).scalars()
         return [self._ticket_from_record(row) for row in rows], total
 
-    def save(self, ticket: Ticket) -> Ticket:
+    def save(self, ticket: Ticket, *, commit: bool = True) -> Ticket:
         record = self.session.get(TicketRecord, ticket.id)
         if record is None:
             raise KeyError(ticket.id)
@@ -108,7 +108,10 @@ class TicketRepository:
         record.priority = ticket.priority.value if ticket.priority else None
         record.escalation_required = ticket.escalation_required
         record.updated_at = datetime.now(UTC)
-        self.session.commit()
+        if commit:
+            self.session.commit()
+        else:
+            self.session.flush()
         self.session.refresh(record)
         return self._ticket_from_record(record)
 

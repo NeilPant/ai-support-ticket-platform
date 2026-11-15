@@ -2,7 +2,8 @@ from datetime import UTC, datetime
 from enum import StrEnum
 from uuid import uuid4
 
-from pydantic import BaseModel, EmailStr, Field
+from pydantic import BaseModel, EmailStr, Field, field_validator
+from pydantic.json_schema import SkipJsonSchema
 
 
 class TicketStatus(StrEnum):
@@ -34,9 +35,16 @@ class TicketCreate(BaseModel):
 
 
 class TicketUpdate(BaseModel):
-    status: TicketStatus | None = None
-    subject: str | None = Field(default=None, min_length=3, max_length=200)
-    description: str | None = Field(default=None, min_length=10, max_length=5000)
+    status: TicketStatus | SkipJsonSchema[None] = Field(default_factory=lambda: None)
+    subject: str | SkipJsonSchema[None] = Field(default_factory=lambda: None, min_length=3, max_length=200)
+    description: str | SkipJsonSchema[None] = Field(default_factory=lambda: None, min_length=10, max_length=5000)
+
+    @field_validator("status", "subject", "description", mode="before")
+    @classmethod
+    def reject_null(cls, value: object) -> object:
+        if value is None:
+            raise ValueError("Omit this field to leave its current value")
+        return value
 
 
 class Ticket(BaseModel):

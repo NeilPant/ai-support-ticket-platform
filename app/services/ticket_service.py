@@ -34,8 +34,8 @@ class TicketService:
 
     def create_ticket(self, payload: TicketCreate) -> TicketResponse:
         ticket = Ticket(**payload.model_dump())
+        self.repository.add_audit_event("ticket", ticket.id, "created", {"subject": ticket.subject}, commit=False)
         created = self.repository.create(ticket)
-        self.repository.add_audit_event("ticket", created.id, "created", {"subject": created.subject})
         return TicketResponse(**created.model_dump())
 
     def list_tickets(
@@ -76,8 +76,8 @@ class TicketService:
         updates = payload.model_dump(exclude_unset=True)
         for key, value in updates.items():
             setattr(ticket, key, value)
+        self.repository.add_audit_event("ticket", ticket.id, "updated", updates, commit=False)
         saved = self.repository.save(ticket)
-        self.repository.add_audit_event("ticket", saved.id, "updated", updates)
         return TicketResponse(**saved.model_dump())
 
     def analyze_ticket(self, ticket_id: str) -> TicketWorkflowResponse:
@@ -86,7 +86,7 @@ class TicketService:
         ticket.status = TicketStatus.analyzed
         ticket.category = result.category
         ticket.priority = result.priority
-        saved = self.repository.save(ticket)
+        saved = self.repository.save(ticket, commit=False)
         run = self.repository.create_workflow_run(result)
         result.run_id = run.id
         return TicketWorkflowResponse(ticket=TicketResponse(**saved.model_dump()), workflow=result)
@@ -101,7 +101,7 @@ class TicketService:
         ticket.category = result.category
         ticket.priority = result.priority
         ticket.escalation_required = result.escalation_required
-        saved = self.repository.save(ticket)
+        saved = self.repository.save(ticket, commit=False)
         run = self.repository.create_workflow_run(result)
         result.run_id = run.id
         return TicketWorkflowResponse(ticket=TicketResponse(**saved.model_dump()), workflow=result)

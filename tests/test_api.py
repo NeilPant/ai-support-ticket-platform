@@ -2,9 +2,11 @@ from unittest.mock import Mock
 
 import pytest
 from fastapi.testclient import TestClient
+from sqlalchemy import event
 
 from app.api.dependencies import get_ticket_service
 from app.main import app
+from app.repositories.orm_models import AuditEventRecord, WorkflowStepRecord
 
 
 def test_health_and_readiness(client: TestClient) -> None:
@@ -142,6 +144,52 @@ def test_update_ticket_and_validation_errors(client: TestClient) -> None:
     assert update.json()["subject"] == "Password reset link expired"
 
 
+@pytest.mark.parametrize("field", ["status", "subject", "description"])
+def test_update_rejects_explicit_null(client: TestClient, field: str) -> None:
+    ticket = _create_ticket(client, "Cannot sign in", "I cannot sign in to my account.")
+
+    update = client.patch(f"/tickets/{ticket['id']}", json={field: None})
+
+    assert update.status_code == 422
+    assert update.json()["detail"][0]["loc"] == ["body", field]
+    assert client.get(f"/tickets/{ticket['id']}").json() == ticket
+
+
+@pytest.mark.parametrize("endpoint", ["analyze", "workflow-runs"])
+def test_ticket_and_workflow_roll_back_when_a_step_cannot_be_saved(client: TestClient, endpoint: str) -> None:
+    ticket = _create_ticket(client, "Payment failed", "My payment failed during checkout and I need help.")
+    url = f"/tickets/{ticket['id']}"
+    event.listen(WorkflowStepRecord, "before_insert", _fail_insert)
+    try:
+        with pytest.raises(RuntimeError, match="simulated database write failure"):
+            client.post(f"{url}/{endpoint}")
+    finally:
+        event.remove(WorkflowStepRecord, "before_insert", _fail_insert)
+
+    assert client.get(url).json() == ticket
+    assert client.get(f"{url}/workflow-runs").json() == []
+
+
+def test_ticket_changes_roll_back_when_audit_event_cannot_be_saved(client: TestClient) -> None:
+    ticket = _create_ticket(client, "Cannot sign in", "I cannot sign in to my account.")
+    url = f"/tickets/{ticket['id']}"
+    event.listen(AuditEventRecord, "before_insert", _fail_insert)
+    try:
+        with pytest.raises(RuntimeError, match="simulated database write failure"):
+            client.post("/tickets", json={
+                "customer_email": "alex@example.com",
+                "subject": "Second ticket",
+                "description": "This ticket should roll back.",
+            })
+        with pytest.raises(RuntimeError, match="simulated database write failure"):
+            client.patch(url, json={"subject": "This update should roll back"})
+    finally:
+        event.remove(AuditEventRecord, "before_insert", _fail_insert)
+
+    assert client.get(url).json() == ticket
+    assert client.get("/tickets").json()["total"] == 1
+
+
 def test_missing_resources_return_404(client: TestClient) -> None:
     assert client.get("/tickets/missing").status_code == 404
     assert client.post("/tickets/missing/workflow-runs").status_code == 404
@@ -167,3 +215,7 @@ def _create_ticket(client: TestClient, subject: str, description: str) -> dict:
     )
     assert response.status_code == 201
     return response.json()
+
+
+def _fail_insert(*_args) -> None:
+    raise RuntimeError("simulated database write failure")
