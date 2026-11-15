@@ -1,11 +1,49 @@
+from unittest.mock import Mock
+
+import pytest
 from fastapi.testclient import TestClient
+
+from app.api.dependencies import get_ticket_service
+from app.main import app
 
 
 def test_health_and_readiness(client: TestClient) -> None:
     assert client.get("/health").status_code == 200
     readiness = client.get("/readiness")
     assert readiness.status_code == 200
+    assert readiness.json()["status"] == "ready"
+    assert readiness.json()["database"] is True
     assert readiness.json()["llm_mode"] == "deterministic_fallback"
+
+
+def test_readiness_reports_database_outage(client: TestClient, monkeypatch: pytest.MonkeyPatch) -> None:
+    check_database = Mock(return_value=False)
+    monkeypatch.setattr("app.main.check_database", check_database)
+
+    readiness = client.get("/readiness")
+
+    assert readiness.status_code == 503
+    assert readiness.json()["status"] == "not_ready"
+    assert readiness.json()["database"] is False
+    check_database.assert_called_once_with()
+    assert client.get("/health").status_code == 200
+
+
+def test_unhandled_error_hides_details_and_preserves_request_id(monkeypatch: pytest.MonkeyPatch) -> None:
+    def fail() -> None:
+        raise RuntimeError("private backend diagnostic")
+
+    monkeypatch.setitem(app.dependency_overrides, get_ticket_service, fail)
+    with TestClient(app, raise_server_exceptions=False) as client:
+        response = client.get("/tickets", headers={"X-Request-ID": "test-request"})
+
+    assert response.status_code == 500
+    assert response.headers["X-Request-ID"] == "test-request"
+    assert response.json() == {
+        "error": "internal_server_error",
+        "detail": "An unexpected error occurred.",
+        "request_id": "test-request",
+    }
 
 
 def test_create_list_filter_and_get_ticket(client: TestClient) -> None:

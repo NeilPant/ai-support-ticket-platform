@@ -97,6 +97,8 @@ POST   /demo/seed
 GET    /analytics/summary
 ```
 
+`/health` reports whether the API process is running. `/readiness` returns HTTP 503 when the database is unavailable.
+
 ## Optional OpenAI Mode
 
 ```bash
