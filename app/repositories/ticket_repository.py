@@ -5,7 +5,7 @@ from datetime import UTC, datetime
 from uuid import uuid4
 
 from sqlalchemy import func, or_, select
-from sqlalchemy.orm import Session, selectinload
+from sqlalchemy.orm import Session, joinedload, selectinload
 
 from app.models.ticket import (
     KnowledgeDocument,
@@ -210,7 +210,7 @@ class TicketRepository:
     def list_knowledge_chunks(self) -> list[KnowledgeChunkRecord]:
         return list(
             self.session.execute(
-                select(KnowledgeChunkRecord).options(selectinload(KnowledgeChunkRecord.document))
+                select(KnowledgeChunkRecord).options(joinedload(KnowledgeChunkRecord.document))
             ).scalars()
         )
 

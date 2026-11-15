@@ -20,7 +20,9 @@ class KnowledgeService:
         documents: list[KnowledgeDocumentRecord] = []
         chunks: list[KnowledgeChunkRecord] = []
 
-        for path in sorted(self.base_path.glob("*.md")):
+        for path in sorted(self.base_path.iterdir()):
+            if not path.match("*.md"):
+                continue
             content = path.read_text(encoding="utf-8")
             checksum = hashlib.sha256(content.encode("utf-8")).hexdigest()
             document_id = str(uuid5(NAMESPACE_URL, str(path.resolve())))
@@ -92,10 +94,12 @@ class KnowledgeService:
         current: list[str] = []
         for paragraph in paragraphs:
             words = paragraph.split()
-            if current and len(current) + len(words) > max_words:
-                chunks.append(" ".join(current))
-                current = []
-            current.extend(words)
+            for start in range(0, len(words), max_words):
+                part = words[start : start + max_words]
+                if current and len(current) + len(part) > max_words:
+                    chunks.append(" ".join(current))
+                    current = []
+                current.extend(part)
         if current:
             chunks.append(" ".join(current))
         return chunks

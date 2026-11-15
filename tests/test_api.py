@@ -1,3 +1,4 @@
+from pathlib import Path
 from unittest.mock import Mock
 
 import pytest
@@ -5,6 +6,7 @@ from fastapi.testclient import TestClient
 from sqlalchemy import event
 
 from app.api.dependencies import get_ticket_service
+from app.core.config import get_settings
 from app.main import app
 from app.repositories.orm_models import AuditEventRecord, WorkflowStepRecord
 
@@ -114,6 +116,34 @@ def test_knowledge_reindex_requires_api_key_and_search_works(client: TestClient)
     search = client.get("/knowledge/search?query=refund%20payment")
     assert search.status_code == 200
     assert search.json()["results"]
+
+
+def test_reindex_splits_long_paragraphs(client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    (tmp_path / "playbook.md").write_text(" ".join(["troubleshooting"] * 200 + ["unique-needle"]), encoding="utf-8")
+    monkeypatch.setattr(get_settings(), "knowledge_base_path", str(tmp_path))
+
+    reindex = client.post("/knowledge/reindex", headers={"X-API-Key": "dev-api-key"})
+    assert reindex.json() == {"documents_indexed": 1, "chunks_indexed": 3}
+
+    matches = client.get("/knowledge/search", params={"query": "troubleshooting"}).json()["results"]
+    assert len(matches) == 3
+    assert max(len(match["content"].split()) for match in matches) == 90
+    assert any("unique-needle" in match["content"] for match in matches)
+
+
+def test_reindex_preserves_existing_index_when_source_is_missing(
+    client: TestClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    headers = {"X-API-Key": "dev-api-key"}
+    assert client.post("/knowledge/reindex", headers=headers).status_code == 200
+    previous = client.get("/knowledge/documents").json()
+    assert previous
+
+    monkeypatch.setattr(get_settings(), "knowledge_base_path", str(tmp_path / "missing"))
+    with pytest.raises(FileNotFoundError):
+        client.post("/knowledge/reindex", headers=headers)
+
+    assert client.get("/knowledge/documents").json() == previous
 
 
 def test_demo_seed_and_analytics(client: TestClient) -> None:
